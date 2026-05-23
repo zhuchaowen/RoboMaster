@@ -18,6 +18,7 @@ public class SensorWrapper {
     private static volatile double currentX = 0.0;
     private static volatile double currentY = 0.0;
     private static volatile double currentYaw = 0.0;
+    private static volatile long currentT0 = 0;
 
     // 启动 UDP 监听线程，实时解析 Python 发来的传感器数据
     private static void startUdpListenerThread(DatagramSocket socket) {
@@ -36,6 +37,7 @@ public class SensorWrapper {
                     if (pyData.containsKey("x")) currentX = pyData.getDoubleValue("x");
                     if (pyData.containsKey("y")) currentY = pyData.getDoubleValue("y");
                     if (pyData.containsKey("yaw")) currentYaw = pyData.getDoubleValue("yaw");
+                    if (pyData.containsKey("t0_py_send")) currentT0 = pyData.getLongValue("t0_py_send");
 
                 } catch (Exception e) {
                     if (!socket.isClosed()) {
@@ -54,7 +56,7 @@ public class SensorWrapper {
         System.out.println("正在启动 Sensor Wrapper...");
 
         // 注册多域传感器，声明域为 x, y, yaw
-        ResourceConfig config = new ResourceConfig("Sensor", ResourceType.SENSOR, List.of("x", "y", "yaw"));
+        ResourceConfig config = new ResourceConfig("Sensor", ResourceType.SENSOR, List.of("x", "y", "yaw", "t0_py_send"));
         WrapperRemoteConnector connector = WrapperRemoteConnector.getInstance();
         DatagramSocket udpSocket = null;
 
@@ -82,6 +84,7 @@ public class SensorWrapper {
                             value.put("x", String.format("%.3f", currentX));
                             value.put("y", String.format("%.3f", currentY));
                             value.put("yaw", String.format("%.1f", currentYaw));
+                            value.put("t0_py_send", currentT0);
 
                             // 发送响应报文
                             CmdMessage response = new CmdMessage(CmdMsgType.SENSORY_BACK, value.toJSONString());

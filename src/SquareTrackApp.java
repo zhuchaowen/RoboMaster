@@ -1,12 +1,23 @@
 import com.alibaba.fastjson.JSONObject;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpServer;
 import lib4app.AbstractApp;
 import lib4app.AppRemoteConnector;
+import lib4app.DBController;
 import struct.ActorInfo;
 import struct.SensorData;
 import struct.SensorInfo;
 import struct.enums.CmdType;
 import struct.enums.SensorMode;
 
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.PrintWriter;
+import java.net.InetSocketAddress;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 public class SquareTrackApp extends AbstractApp {
@@ -23,9 +34,19 @@ public class SquareTrackApp extends AbstractApp {
     private volatile double currentY = 0.0;
     private volatile double currentYaw = 0.0;
 
-    // 设备名称常量
+    private volatile long t0_py_send = 0;
+    private volatile long t1_app_recv = 0;
+
+    private volatile long currentLatency = 0;
+    private PrintWriter csvWriter;
+
+    // 设备与数据库常量
     private static final String SENSOR_NAME = "Sensor";
     private static final String ACTOR_NAME = "Chassis";
+    private static final String TABLE_NAME = "robot_trajectory"; // 定义监控轨迹的表名
+
+    // 数据库控制器实例
+    private DBController dbController;
 
     @Override
     public void configApp() {
@@ -38,12 +59,46 @@ public class SquareTrackApp extends AbstractApp {
     public void getMsg(String sensorName, SensorData sensorData) {
         // 以被动模式接收到传感器信息时将被自动调用 (20Hz)
         if (sensorName != null && sensorName.contains(SENSOR_NAME)) {
+            // T1: 大脑收到数据的瞬间
+            t1_app_recv = System.currentTimeMillis();
+
             try {
                 // 解析 Wrapper 层传来的多域传感器数据
                 // 平台解析底层传来的 JSON 后，可以通过 getData("域名") 获取
                 currentX = Double.parseDouble(sensorData.getData("x").toString());
                 currentY = Double.parseDouble(sensorData.getData("y").toString());
                 currentYaw = Double.parseDouble(sensorData.getData("yaw").toString());
+
+                // 获取 t0_py_send
+                Object t0Obj = sensorData.getData("t0_py_send");
+                if (t0Obj != null) {
+                    t0_py_send = Long.parseLong(t0Obj.toString());
+                }
+
+                // 将实时状态与时延写入平台内置数据库
+                if (dbController != null) {
+                    Map<String, Object> row = new HashMap<>();
+                    // 使用当前接收时间戳作为主键
+                    row.put("timestamp", String.valueOf(t1_app_recv));
+                    row.put("x", currentX);
+                    row.put("y", currentY);
+                    row.put("yaw", currentYaw);
+
+                    // 计算上行及轮询总时延
+                    currentLatency = (t0_py_send > 0) ? (t1_app_recv - t0_py_send) : 0;
+                    row.put("uplink_latency", currentLatency);
+
+                    // 异步插入单行数据
+                    dbController.insertRow(TABLE_NAME, row);
+                }
+
+                // 将这一帧数据追加写入本地文件
+                if (csvWriter != null) {
+                    // 使用逗号分隔每一个数据，\n 换行
+                    csvWriter.printf("%d,%.3f,%.3f,%.3f,%d\n",
+                            t1_app_recv, currentX, currentY, currentYaw, currentLatency);
+                    csvWriter.flush(); // 强制立刻刷入硬盘，防止程序崩溃丢失数据
+                }
             } catch (Exception e) {
                 System.err.println("解析传感器数据异常: " + e.getMessage());
             }
@@ -72,6 +127,13 @@ public class SquareTrackApp extends AbstractApp {
         cmd.put("x", x);
         cmd.put("y", y);
         cmd.put("z", z);
+
+        cmd.put("t0_py_send", t0_py_send);
+        cmd.put("t1_app_recv", t1_app_recv);
+
+        // T2: 大脑发出指令的瞬间
+        cmd.put("t2_app_send", System.currentTimeMillis());
+
         connector.sendActorCmd(ACTOR_NAME, cmd.toJSONString());
     }
 
@@ -141,7 +203,42 @@ public class SquareTrackApp extends AbstractApp {
             }
             connector.registerApp(app);
 
-            // 1. 注册 Sensor (被动模式，期望频率 20Hz)
+            // 创建本地 CSV 文件，准备导出给 Excel
+            try {
+                // 在项目根目录下自动创建一个 robot_data.csv 文件
+                app.csvWriter = new PrintWriter(new FileWriter("robot_data.csv"));
+                // 写入 Excel 的第一行（表头）
+                app.csvWriter.println("Timestamp,X_Position,Y_Position,Yaw_Angle,Uplink_Latency_ms");
+                app.csvWriter.flush();
+                System.out.println("📊 数据记录仪启动成功！数据将实时保存至 robot_data.csv");
+            } catch (IOException e) {
+                System.out.println("创建 CSV 文件失败: " + e.getMessage());
+            }
+
+            // 注册自定义 Web 监控界面
+            // 第一个参数是浏览器里敲的网址后缀，第二个参数是你本地编写的网页文件名
+            boolean uiReady = connector.setUI("monitor.jsp", "dashboard.html");
+            System.out.println("监控界面部署状态: " + uiReady + "，请访问: http://localhost:8080/monitor.jsp");
+
+            // 获取数据库句柄并初始化监控表
+            app.dbController = connector.getDBControllerInstance();
+            if (app.dbController != null) {
+                // 每次启动重置历史轨迹表，确保图表从零绘制
+                app.dbController.deleteTable(TABLE_NAME);
+
+                // 创建包含时间戳、位置、偏航角、上行时延的监控表，最大容量限制10000行防止缓存积压
+                boolean isCreated = app.dbController.createTable(
+                        TABLE_NAME,
+                        "timestamp",
+                        List.of("timestamp", "x", "y", "yaw", "uplink_latency"),
+                        10000
+                );
+                System.out.println("SEPAL 内置数据库监控表初始化状态: " + isCreated);
+            } else {
+                System.out.println("警告: 未获取到数据库控制器实例，UI 监测数据将无法保存。");
+            }
+
+            // 注册 Sensor (被动模式，期望频率 20Hz)
             Map<String, SensorInfo> supportedSensors = connector.getSupportedSensors();
             if (supportedSensors.containsKey(SENSOR_NAME) && "ON".equals(supportedSensors.get(SENSOR_NAME).getStatus())) {
                 connector.registerSensor(SENSOR_NAME, SensorMode.PASSIVE, 20);
@@ -152,7 +249,7 @@ public class SquareTrackApp extends AbstractApp {
                 return;
             }
 
-            // 2. 注册 Actor
+            // 注册 Actor
             Map<String, ActorInfo> supportedActors = connector.getSupportedActors();
             if (supportedActors.containsKey(ACTOR_NAME)) {
                 connector.registerActor(ACTOR_NAME);
@@ -184,6 +281,37 @@ public class SquareTrackApp extends AbstractApp {
                 else if (squareAngles[i] < -180) squareAngles[i] += 360;
             }
 
+            try {
+                // 在 8081 端口启动一个微型 HTTP 服务器
+                HttpServer server = HttpServer.create(new InetSocketAddress(8081), 0);
+                server.createContext("/api/data", new HttpHandler() {
+                    @Override
+                    public void handle(HttpExchange exchange) throws IOException {
+                        // 允许跨域请求 (CORS)，让前端网页能顺利拉取
+                        exchange.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+                        exchange.getResponseHeaders().add("Content-Type", "application/json");
+
+                        // 将小车当前最新状态拼接成标准 JSON 格式
+                        String jsonResponse = String.format("{\"x\": %.3f, \"y\": %.3f, \"latency\": %d}",
+                                app.currentX, app.currentY, app.currentLatency);
+
+                        byte[] responseBytes = jsonResponse.getBytes("UTF-8");
+                        exchange.sendResponseHeaders(200, responseBytes.length);
+                        OutputStream os = exchange.getResponseBody();
+                        os.write(responseBytes);
+                        os.close();
+                    }
+                });
+                server.setExecutor(null);
+                server.start();
+                System.out.println("💡 微型数据 API 已成功启动！前端请求地址: http://localhost:8081/api/data");
+            } catch (IOException e) {
+                System.out.println("API 服务器启动失败: " + e.getMessage());
+            }
+
+            long startTime = System.currentTimeMillis();
+            System.out.println("开始计时：SEPAL 跑圈任务启动");
+
             for (int lap = 0; lap < 5; lap++) {
                 System.out.printf("\n====== 开始第 %d 圈 ======\n", lap + 1);
                 for (int side = 0; side < squareAngles.length; side++) {
@@ -198,7 +326,9 @@ public class SquareTrackApp extends AbstractApp {
                 }
             }
 
-            System.out.println("\n跑圈任务圆满完成！");
+            long endTime = System.currentTimeMillis();
+            double totalDuration = (endTime - startTime) / 1000.0;
+            System.out.printf("任务完成！SEPAL 平台下跑完 5 圈总耗时: %.2f 秒\n", totalDuration);
 
         } catch (InterruptedException e) {
             System.out.println("任务被中断。");
@@ -207,11 +337,19 @@ public class SquareTrackApp extends AbstractApp {
         } finally {
             System.out.println("正在清理 SEPAL 平台资源...");
             app.sendStopCmd(connector); // 确保小车停下
+
+            // 安全关闭文件记录仪
+            if (app.csvWriter != null) {
+                app.csvWriter.close();
+                System.out.println("数据已安全落盘！请在项目目录下查看 robot_data.csv 文件。");
+            }
+
             connector.cancelAllActors();
             connector.cancelAllSensors();
             connector.getMsgThread(CmdType.STOP);
             connector.unregisterApp(app);
             connector.disConnectPlatform();
+
             System.out.println("应用已安全退出。");
         }
     }

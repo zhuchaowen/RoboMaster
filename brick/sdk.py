@@ -89,6 +89,7 @@ if __name__ == '__main__':
         ep_chassis.sub_attitude(freq=20, callback=attitude_callback)
         time.sleep(1) 
             
+
         # 基准角度
         base_yaw = current_yaw
 
@@ -105,7 +106,10 @@ if __name__ == '__main__':
         # 将角度标准化到 -180 ~ 180 范围内
         square_angles = [a - 360 if a > 180 else (a + 360 if a < -180 else a) for a in square_angles]
 
-        for lap in range(10):
+        start_time = time.time()
+        print("开始计时：跑圈任务启动")
+
+        for lap in range(5):
             print(f"\n====== 开始第 {lap+1} 圈 ======")
             for side, target_angle in enumerate(square_angles):
                 print(f"--- 正在跑第 {side+1} 条边 ---")
@@ -114,7 +118,9 @@ if __name__ == '__main__':
                 # 2. 直行冲刺
                 drive_straight_with_imu(ep_chassis, target_dist=STRAIGHT_DISTANCE, target_yaw=target_angle)
 
-        print("\n跑圈任务圆满完成！")
+        end_time = time.time()
+        total_duration = end_time - start_time
+        print(f"任务完成！跑完 5 圈总耗时: {total_duration:.2f} 秒")
 
     except KeyboardInterrupt:
         print("\n接收到手动中断指令")

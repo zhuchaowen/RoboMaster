@@ -24,6 +24,8 @@ robot_state = {"x": 0.0, "y": 0.0, "yaw": 0.0}
 # ==========================================
 def send_sensor_data():
     """将最新状态打包为 JSON 发送给 Java SensorWrapper"""
+    # T0: Python 产生数据的瞬间
+    robot_state["t0_py_send"] = int(time.time() * 1000)
     try:
         json_str = json.dumps(robot_state)
         udp_client.sendto(json_str.encode('utf-8'), (WRAPPER_IP, SENSOR_PORT))
@@ -56,6 +58,25 @@ def cmd_listener_thread(ep_chassis):
             # {"cmd": "drive", "x": 0.4, "y": 0.0, "z": 20.0}
             # {"cmd": "stop"}
             cmd_data = json.loads(msg)
+
+            if "t0_py_send" in cmd_data:
+                # T3: Python 收到指令的瞬间
+                t3_py_recv = int(time.time() * 1000)
+                
+                try:
+                    # 强制将提取出来的值也转为整数，防止 Java 传回来字符串
+                    t0 = int(cmd_data["t0_py_send"])
+                    t1 = int(cmd_data.get("t1_app_recv", t0))
+                    t2 = int(cmd_data.get("t2_app_send", t0))
+                    
+                    total_rtt = t3_py_recv - t0
+                    uplink_polling = t1 - t0      
+                    app_compute = t2 - t1         
+                    downlink_total = t3_py_recv - t2 
+                    
+                    print(f"[延迟解剖] 总RTT:{total_rtt}ms | 上行:{uplink_polling}ms | App计算:{app_compute}ms | 下行:{downlink_total}ms")
+                except Exception as e:
+                    print(f"时间戳计算异常: {e}")
 
             if cmd_data.get("cmd") == "drive":
                 speed_x = cmd_data.get("x", 0.0)

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>SEPAL 跑圈全链路监控中枢</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <style>
+        body { background-color: #111; color: #fff; font-family: Arial, sans-serif; text-align: center; margin: 0; padding: 20px; }
+        .dashboard { display: flex; justify-content: space-around; margin-top: 20px; }
+        .chart-container { width: 48%; height: 550px; background-color: #222; border-radius: 12px; padding: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+    </style>
+</head>
+<body>
+<h1 style="color: #50C878;">RoboMaster 闭环控制与动态时延大屏</h1>
+<p>基于 SEPAL 平台 20Hz 实时数据链路</p>
+
+<div class="dashboard">
+    <div id="trajChart" class="chart-container"></div>
+    <div id="latChart" class="chart-container"></div>
+</div>
+<script>
+    var chartTraj = echarts.init(document.getElementById('trajChart'));
+    chartTraj.setOption({
+        title: { text: '小车实时 X-Y 轨迹 (0 延迟内存直读)', textStyle: { color: '#ccc' } },
+        tooltip: { trigger: 'item' },
+        xAxis: { type: 'value', name: 'X 坐标 (m)', min: -1, max: 2 },
+        yAxis: { type: 'value', name: 'Y 坐标 (m)', min: -1, max: 2 },
+        series: [{ type: 'scatter', symbolSize: 6, itemStyle: { color: '#50C878' }, data: [] }]
+    });
+
+    var chartLat = echarts.init(document.getElementById('latChart'));
+    chartLat.setOption({
+        title: { text: '系统上行网络时延 (ms)', textStyle: { color: '#ccc' } },
+        tooltip: { trigger: 'axis' },
+        xAxis: { type: 'category', name: '时间', data: [] },
+        yAxis: { type: 'value', name: '时延 (ms)' },
+        series: [{ type: 'line', smooth: true, itemStyle: { color: '#ff4d4d' }, areaStyle: { color: 'rgba(255, 77, 77, 0.2)' }, data: [] }]
+    });
+
+    // 存放前端历史数据的数组
+    let trajData = [];
+    let timeData = [];
+    let latData = [];
+
+    // 🎯 指向我们刚刚在 Java 里手写的微型 API！
+    const API_URL = 'http://localhost:8081/api/data';
+
+    function fetchPlatformData() {
+        fetch(API_URL)
+            .then(res => res.json())
+            .then(data => {
+                // 拿到一帧数据：{"x": 0.123, "y": 0.456, "latency": 12}
+                trajData.push([data.x, data.y]);
+
+                let now = new Date();
+                let timeStr = now.getSeconds() + "s " + now.getMilliseconds() + "ms";
+                timeData.push(timeStr);
+                latData.push(data.latency);
+
+                // 限制只显示最近的 200 个点，防止跑的时间太长把浏览器内存撑爆
+                if (trajData.length > 200) {
+                    trajData.shift();
+                    timeData.shift();
+                    latData.shift();
+                }
+
+                // 刷新 ECharts 画布
+                chartTraj.setOption({ series: [{ data: trajData }] });
+                chartLat.setOption({ xAxis: { data: timeData }, series: [{ data: latData }] });
+            })
+            .catch(err => console.log('等待 Java API 服务启动...'));
+    }
+
+    // 每隔 0.5 秒拉取一次
+    setInterval(fetchPlatformData, 500);
+</script>
+</body>
+</html>
