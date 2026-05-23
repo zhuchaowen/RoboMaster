@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="sepal4java">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/lib/sepal4java.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

@@ -1,0 +1,4 @@
+[ERROR] [2026-05-23 15:27:36,396] [Thread: Thread-0] [Class:appmgr.AppDriver >> Method: resource.ResourceDriver$DeviceDriverTCP.callback(ResourceDriver.java:48)]
+[Sensor]: TCP connection is broken. Set the status to off
+[ERROR] [2026-05-23 15:27:36,458] [Thread: Thread-1] [Class:appmgr.AppDriver >> Method: resource.ResourceDriver$DeviceDriverTCP.callback(ResourceDriver.java:48)]
+[Chassis]: TCP connection is broken. Set the status to off
