@@ -5,11 +5,13 @@ import com.sun.net.httpserver.HttpServer;
 import lib4app.AbstractApp;
 import lib4app.AppRemoteConnector;
 import lib4app.DBController;
+import lib4app.InvCheck;
 import struct.ActorInfo;
+import struct.InvServiceConfig;
 import struct.SensorData;
 import struct.SensorInfo;
-import struct.enums.CmdType;
-import struct.enums.SensorMode;
+import struct.enums.*;
+import struct.sync.SynchronousSensorData;
 
 import java.io.FileWriter;
 import java.io.IOException;
@@ -19,8 +21,11 @@ import java.net.InetSocketAddress;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class SquareTrackApp extends AbstractApp {
+    public Map<String, SynchronousSensorData> invReport = new ConcurrentHashMap<>();
+
     // ==========================================
     // 核心参数配置区
     // ==========================================
@@ -57,6 +62,13 @@ public class SquareTrackApp extends AbstractApp {
 
     @Override
     public void getMsg(String sensorName, SensorData sensorData) {
+        // 拦截不变式检测结果
+        if (sensorData.getType() == SensorDataType.INV_REPORT) {
+            // 如果数据类型是不变式服务结果，放入全局队列
+            invReport.computeIfAbsent(sensorName, k -> new SynchronousSensorData()).put(sensorData);
+            return; // 拦截完毕直接返回
+        }
+
         // 以被动模式接收到传感器信息时将被自动调用 (20Hz)
         if (sensorName != null && sensorName.contains(SENSOR_NAME)) {
             // T1: 大脑收到数据的瞬间
@@ -122,6 +134,28 @@ public class SquareTrackApp extends AbstractApp {
 
     // 向底盘下发速度控制指令 (组装成 JSON 格式)
     private void sendDriveCmd(AppRemoteConnector connector, double x, double y, double z) {
+        InvCheck checker = InvCheck.getInstance();
+        if (checker != null) {
+            // 提交待下发的速度变量进行检测
+            checker.check(x, z);
+
+            try {
+                // 阻塞等待 SEPAL 平台返回结果。
+                SensorData data = invReport.computeIfAbsent("INV_REPORT140", k -> new SynchronousSensorData()).blockTake();
+                CheckResult result = checker.getResult(data);
+
+                // 如果平台判定违规
+                if (result == CheckResult.INV_VIOLATED) {
+                    System.err.printf("熔断触发！拦截到异常指令: speed_x=%.2f, speed_z=%.2f\n", x, z);
+                    // 下发停车指令，切断原操作
+                    sendStopCmd(connector);
+                    return;
+                }
+            } catch (Exception e) {
+                System.err.println("不变式检测出现异常: " + e.getMessage());
+            }
+        }
+
         JSONObject cmd = new JSONObject();
         cmd.put("cmd", "drive");
         cmd.put("x", x);
@@ -202,6 +236,22 @@ public class SquareTrackApp extends AbstractApp {
                 return;
             }
             connector.registerApp(app);
+
+            // 新增核心代码：配置并启动不变式服务
+            InvServiceConfig invConfig = new InvServiceConfig();
+            invConfig.setGrpOn(false);
+            invConfig.setInvGenThro(50); // 收集 50 帧数据后自动生成不变式约束
+
+            invConfig.setChkFiles(List.of("src/SquareTrackApp.java"));
+
+            connector.serviceStart(ServiceType.INV, invConfig);
+
+            InvCheck checker = InvCheck.getInstance();
+
+            // 声明我们要监控的底层速度变量
+            double speed_x = 0.0, speed_z = 0.0;
+            checker.monitor(speed_x, speed_z);
+            System.out.println("SEPAL 不变式防御服务启动完毕！");
 
             // 创建本地 CSV 文件，准备导出给 Excel
             try {
@@ -337,6 +387,14 @@ public class SquareTrackApp extends AbstractApp {
         } finally {
             System.out.println("正在清理 SEPAL 平台资源...");
             app.sendStopCmd(connector); // 确保小车停下
+
+            // 关闭不变式服务
+            InvCheck checker = InvCheck.getInstance();
+            if (checker != null && checker.checkGenerated()) {
+                checker.saveTo("invs.txt"); // 把本次跑圈生成的安全规则保存下来，留作下次使用
+                System.out.println("不变式规则已成功保存至本地！");
+            }
+            connector.serviceStop(ServiceType.INV);
 
             // 安全关闭文件记录仪
             if (app.csvWriter != null) {
